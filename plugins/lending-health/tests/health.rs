@@ -131,3 +131,20 @@ fn parses_percent_style_ltv_and_missing_stats() {
 fn garbage_body_is_a_clean_error() {
     assert!(parse_obligations("<html>oops</html>").is_err());
 }
+
+#[test]
+fn parses_real_live_api_fixture_with_map_style_positions() {
+    // Captured 2026-07-28 from the live obligations endpoint: deposits/borrows
+    // arrive as (possibly empty) objects, not arrays; stats carry the LTV.
+    let body = include_str!("fixtures_whale.json");
+    let obs = parse_obligations(body).unwrap();
+    assert_eq!(obs.len(), 1);
+    let o = &obs[0];
+    assert!(o.deposits_usd > 4_000_000.0, "deposits {}", o.deposits_usd);
+    assert!(o.borrows_usd > 2_500_000.0);
+    assert!((o.ltv - 0.756).abs() < 0.01, "ltv {}", o.ltv);
+    assert!((o.liq_ltv - 0.90).abs() < 1e-9);
+    let out = render("whale", "main", &obs, &cfg());
+    // drop-to-liq = 1 - .756/.9 = 16% -> WARN at default 25/10 thresholds.
+    assert!(out.contains("\"status\":\"WARN\""), "expected WARN: {out}");
+}

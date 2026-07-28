@@ -32,8 +32,32 @@ pub struct ApiObligation {
     #[serde(alias = "obligation", alias = "address")]
     pub obligation_address: String,
     pub refreshed_stats: Stats,
-    pub deposits: Vec<Position>,
-    pub borrows: Vec<Position>,
+    pub deposits: Positions,
+    pub borrows: Positions,
+}
+
+/// The live API returns deposits/borrows as an object keyed by reserve (and
+/// sometimes empty); older shapes and SDK dumps use an array. Accept both.
+#[derive(Deserialize)]
+#[serde(untagged)]
+pub enum Positions {
+    List(Vec<Position>),
+    Map(std::collections::HashMap<String, Position>),
+}
+
+impl Default for Positions {
+    fn default() -> Self {
+        Positions::List(Vec::new())
+    }
+}
+
+impl Positions {
+    fn into_vec(self) -> Vec<Position> {
+        match self {
+            Positions::List(v) => v,
+            Positions::Map(m) => m.into_values().collect(),
+        }
+    }
 }
 
 #[derive(Deserialize, Default)]
@@ -90,8 +114,8 @@ pub fn parse_obligations(body: &str) -> Result<Vec<Obligation>, String> {
     Ok(raw
         .into_iter()
         .map(|o| {
-            let deposits = positions(&o.deposits);
-            let borrows = positions(&o.borrows);
+            let deposits = positions(&o.deposits.into_vec());
+            let borrows = positions(&o.borrows.into_vec());
             // Prefer refreshed stats; fall back to summing positions.
             let dep_usd = {
                 let s = o.refreshed_stats.user_total_deposit.val();
