@@ -88,11 +88,29 @@ Layering (scored — least code preferred):
       pattern works; config entry seeded
 - [x] SOP VALIDATED: sop.sops_dir=C:\Users\chris\.zeroclaw\sops,
       `sop validate lending-watch` ✅, `sop list` shows cron+manual triggers
-- [ ] End-to-end agent demo BLOCKED on Chris: `claude setup-token` is an
-      interactive browser OAuth (tell Chris: type `! claude setup-token` in
-      session), then `zeroclaw quickstart --model-provider anthropic`; plus
-      Telegram @BotFather token for the channel. `zeroclaw doctor`: 18 ok,
-      2 warn, 2 err (expected pre-quickstart: no provider/channel)
+- [x] END-TO-END WORKS (2026-07-28 ~00:40): `zeroclaw agent -a sentinel -m
+      "check wallet 1111..."` → model called lending_health → WASM ran →
+      Kamino API → NO_POSITIONS report → smart summary. Config wiring:
+      providers.models.anthropic.main (setup-token as api_key, encrypted;
+      model claude-sonnet-5), agents.sentinel (model_provider anthropic.main,
+      channels ["telegram.guardian"], risk_profile guarded),
+      risk_profiles.guarded (level full + allowed_tools ["lending_health"] —
+      single-tool lockdown, USE THIS IN WRITE-UP), channels.telegram.guardian
+      (bot @chris_sentinel_bot, token encrypted, enabled). Headless config
+      trick: `config set --no-interactive` (quickstart/secret prompts need
+      TTY). Chris chat_id 5002815963 (@christianp1211).
+- [x] DAEMON RUNNING detached (log ~/.zeroclaw/daemon.log): channels+agent
+      loaded, listening
+- [x] GitHub: gh authed as christianpichichero-max; REPO PUBLIC:
+      github.com/christianpichichero-max/zeroclaw-sentinel (main, f9affd6)
+- [ ] Telegram live test: Chris messages bot w/ daemon up (pairing flow TBD
+      — watch daemon.log)
+- [ ] Real Kamino position for demo (Chris tiny deposit+borrow ~$20-50, or
+      monitor a public whale wallet)
+- [ ] Prompt-injection test transcript (mock hostile token symbol via
+      api_base override to a local fixture server)
+- [ ] Cleanup: delete ~/.zeroclaw/setup_token_transcript.txt after Chris
+      closes green PS window (Start-Transcript holds it)
 - [ ] Capture real obligation fixture (whale wallet or Chris tiny position) —
       synthetic fixtures in tests for now; parser is alias-tolerant
 - [x] src/health.rs: pure math core + native tests (11/11 pass)
