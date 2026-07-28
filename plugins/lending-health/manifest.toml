@@ -1,0 +1,10 @@
+name = "lending-health"
+version = "0.1.0"
+description = "Kamino lending health for a Solana wallet: LTV vs liquidation LTV, distance-to-liquidation, and repay/add-collateral action math. Read-only."
+author = "Sentinel"
+wasm_path = "lending_health.wasm"
+capabilities = ["tool"]
+# http_client: one outbound GET to the configured Kamino API base.
+# config_read: api_base / market / target_ltv / warn_drop_pct / crit_drop_pct,
+# all optional — an empty section runs with safe public defaults.
+permissions = ["http_client", "config_read"]

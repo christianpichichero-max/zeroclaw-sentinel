@@ -1,0 +1,16 @@
+[sop]
+name = "lending-watch"
+description = "Kamino liquidation guardian: poll wallet lending health on a schedule, alert the operator before liquidation risk becomes real"
+version = "0.1.0"
+max_concurrent = 1
+# A tick that fires while the previous check is still running carries no new
+# information — collapse it onto the in-flight run.
+admission_policy = "coalesce"
+
+[[triggers]]
+type = "cron"
+expression = "*/15 * * * *"
+
+# Manual trigger kept for demos and on-demand checks from an agent turn.
+[[triggers]]
+type = "manual"
