@@ -16,7 +16,7 @@ mod component {
     use std::collections::HashMap;
 
     use crate::health::{render, Config};
-    use crate::parse::parse_obligations;
+    use crate::parse::{parse_obligations, parse_reserves, ReserveMap};
     use exports::zeroclaw::plugin::plugin_info::Guest as PluginInfo;
     use exports::zeroclaw::plugin::tool::{Guest as Tool, ToolResult};
     use zeroclaw::plugin::logging::{
@@ -52,6 +52,47 @@ mod component {
         );
     }
 
+    /// GET a URL, returning the body on 200. Any failure is None: these are
+    /// enrichment calls, and a health report without them is still correct.
+    fn get_ok(url: &str) -> Option<String> {
+        let resp = waki::Client::new()
+            .get(url)
+            .connect_timeout(std::time::Duration::from_secs(8))
+            .send()
+            .ok()?;
+        if resp.status_code() != 200 {
+            return None;
+        }
+        resp.body().ok().map(|b| String::from_utf8_lossy(&b).into_owned())
+    }
+
+    /// Reserve-address -> token symbol for this market. Best effort.
+    fn fetch_reserves(api_base: &str, market: &str) -> ReserveMap {
+        match get_ok(&format!("{api_base}/kamino-market/{market}/reserves/metrics")) {
+            Some(body) => parse_reserves(&body),
+            None => ReserveMap::new(),
+        }
+    }
+
+    /// Head slot from an independent Solana RPC. This is the second opinion:
+    /// it lets the report say how old the on-chain snapshot is instead of
+    /// taking the API's word that everything is current.
+    fn fetch_head_slot(rpc_url: &str) -> Option<u64> {
+        let resp = waki::Client::new()
+            .post(rpc_url)
+            .header("Content-Type", "application/json")
+            .body(br#"{"jsonrpc":"2.0","id":1,"method":"getSlot"}"#.to_vec())
+            .connect_timeout(std::time::Duration::from_secs(8))
+            .send()
+            .ok()?;
+        if resp.status_code() != 200 {
+            return None;
+        }
+        let body = resp.body().ok()?;
+        let v: serde_json::Value = serde_json::from_slice(&body).ok()?;
+        v.get("result")?.as_u64()
+    }
+
     impl PluginInfo for LendingHealth {
         fn plugin_name() -> String {
             "lending-health".to_string()
@@ -71,7 +112,10 @@ mod component {
              borrows, current vs liquidation LTV, how far collateral can drop \
              before liquidation, and the exact repay/add-collateral amounts to \
              reach a safe LTV. Read-only public data; makes an outbound HTTPS \
-             request and may surface an operator approval prompt."
+             request and may surface an operator approval prompt. Names the \
+             specific borrowed token to repay, and reports how far behind \
+             the chain the on-chain snapshot is, so a stale reading is \
+             never mistaken for a safe one."
                 .to_string()
         }
 
@@ -137,7 +181,10 @@ mod component {
                 return Ok(fail(format!("Kamino API returned {status}: {head}")));
             }
 
-            let obligations = match parse_obligations(&body) {
+            let reserves = fetch_reserves(&cfg.api_base, &market);
+            let head_slot = fetch_head_slot(&cfg.rpc_url);
+
+            let obligations = match parse_obligations(&body, &reserves) {
                 Ok(o) => o,
                 Err(e) => {
                     log(PluginOutcome::Failure, "unexpected api shape");
@@ -145,7 +192,7 @@ mod component {
                 }
             };
 
-            let output = render(&wallet, &market, &obligations, &cfg);
+            let output = render(&wallet, &market, &obligations, &cfg, head_slot);
             log(PluginOutcome::Success, "health computed");
             Ok(ToolResult { success: true, output, error: None })
         }

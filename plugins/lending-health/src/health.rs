@@ -12,6 +12,9 @@ pub struct Config {
     pub target_ltv: f64,
     pub warn_drop_pct: f64,
     pub crit_drop_pct: f64,
+    /// Independent Solana RPC used to read head slot, so the report can state
+    /// how old the on-chain snapshot is rather than trusting the API blindly.
+    pub rpc_url: String,
 }
 
 impl Config {
@@ -36,6 +39,11 @@ impl Config {
             target_ltv: get_f("target_ltv", 0.50).min(0.95),
             warn_drop_pct: get_f("warn_drop_pct", 25.0),
             crit_drop_pct: get_f("crit_drop_pct", 10.0),
+            rpc_url: s
+                .get("rpc_url")
+                .filter(|v| !v.is_empty())
+                .cloned()
+                .unwrap_or_else(|| "https://api.mainnet-beta.solana.com".to_string()),
         }
     }
 }
@@ -53,6 +61,15 @@ pub struct Obligation {
     /// (token symbol, usd value), largest first.
     pub top_deposits: Vec<(String, f64)>,
     pub top_borrows: Vec<(String, f64)>,
+    /// Composition from the on-chain snapshot: which tokens, largest first.
+    /// Dollar values here are as of `last_update_slot` and may be stale; the
+    /// symbols are what make an alert actionable ("repay your USDC").
+    pub collateral_tokens: Vec<(String, f64)>,
+    pub debt_tokens: Vec<(String, f64)>,
+    /// Slot of the last on-chain refresh of this obligation.
+    pub last_update_slot: u64,
+    /// The lending program's own stale flag on the account.
+    pub onchain_stale: bool,
 }
 
 #[derive(PartialEq, Debug, Clone, Copy)]
@@ -135,6 +152,13 @@ fn r2(v: f64) -> f64 {
     (v * 100.0).round() / 100.0
 }
 
+/// Token symbols only, largest first, capped - keeps the model's view tight
+/// and avoids implying stale dollar values are current.
+fn names(v: &[(String, f64)]) -> Vec<String> {
+    v.iter().take(3).map(|(t, _)| t.clone()).collect()
+}
+
+#[allow(dead_code)]
 fn top2(v: &[(String, f64)]) -> Vec<serde_json::Value> {
     v.iter()
         .take(2)
@@ -144,7 +168,13 @@ fn top2(v: &[(String, f64)]) -> Vec<serde_json::Value> {
 
 /// Compact report for the model: judges inspect tool returns, keep it tight
 /// (~200 tokens). Worst obligation first.
-pub fn render(wallet: &str, market: &str, obs: &[Obligation], cfg: &Config) -> String {
+pub fn render(
+    wallet: &str,
+    market: &str,
+    obs: &[Obligation],
+    cfg: &Config,
+    head_slot: Option<u64>,
+) -> String {
     if obs.is_empty() {
         return serde_json::json!({
             "wallet": wallet, "market": market,
@@ -178,20 +208,44 @@ pub fn render(wallet: &str, market: &str, obs: &[Obligation], cfg: &Config) -> S
             "borrows_usd": r2(o.borrows_usd),
             "ltv_pct": r2(o.ltv * 100.0),
             "liq_ltv_pct": r2(o.liq_ltv * 100.0),
-            "top_deposits": top2(&o.top_deposits),
-            "top_borrows": top2(&o.top_borrows),
+            "collateral": names(&o.collateral_tokens),
+            "debt": names(&o.debt_tokens),
         });
         let obj = item.as_object_mut().unwrap();
+        // Independent freshness check: how far behind head is the on-chain
+        // snapshot? A stale account plus a SAFE verdict is the false-safe we
+        // refuse to emit silently.
+        if let Some(head) = head_slot {
+            if head > o.last_update_slot && o.last_update_slot > 0 {
+                let mins = ((head - o.last_update_slot) as f64 * 0.4 / 60.0).round();
+                obj.insert("onchain_snapshot_age_min".into(), serde_json::json!(mins));
+            }
+        }
+        if o.onchain_stale {
+            obj.insert(
+                "note".into(),
+                serde_json::json!(
+                    "on-chain account is flagged stale; USD figures come from the API's live                      recomputation, token list from the last on-chain refresh"
+                ),
+            );
+        }
         if let Some(d) = a.price_drop_to_liq_pct {
             obj.insert("collateral_drop_to_liq_pct".into(), serde_json::json!(r2(d)));
         }
         if let Some(rp) = a.repay_usd_to_target {
             if rp > 0.0 {
+                // Name the borrowed token when we know it: "repay $2000 of
+                // USDC" is actionable, "repay $2000 of debt" is a puzzle.
+                let debt_label = match o.debt_tokens.first() {
+                    Some((t, _)) => format!("of {t}"),
+                    None => "of debt".to_string(),
+                };
                 obj.insert(
                     "action".into(),
                     serde_json::json!(format!(
-                        "repay ${} of debt OR add ${} collateral to reach {}% LTV",
+                        "repay ${} {} OR add ${} collateral to reach {}% LTV",
                         r2(rp),
+                        debt_label,
                         r2(a.add_collateral_usd.unwrap_or(0.0)),
                         r2(cfg.target_ltv * 100.0)
                     )),

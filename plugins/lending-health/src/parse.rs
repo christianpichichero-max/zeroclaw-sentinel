@@ -34,6 +34,89 @@ pub struct ApiObligation {
     pub refreshed_stats: Stats,
     pub deposits: Positions,
     pub borrows: Positions,
+    /// Raw on-chain account snapshot. Carries the per-reserve breakdown that
+    /// the top-level maps omit, plus the slot of the last on-chain refresh.
+    pub state: State,
+}
+
+/// On-chain obligation state. Values here are as of `last_update.slot`, which
+/// can be far behind head: a position only refreshes when someone touches it.
+/// Use it for composition (which tokens), never for current dollar values.
+#[derive(Deserialize, Default)]
+#[serde(default, rename_all = "camelCase")]
+pub struct State {
+    pub last_update: LastUpdate,
+    pub deposits: Vec<StatePos>,
+    pub borrows: Vec<StatePos>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default, rename_all = "camelCase")]
+pub struct LastUpdate {
+    pub slot: Num,
+    /// 0 = fresh, non-zero = the program considers this account stale.
+    pub stale: Num,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default, rename_all = "camelCase")]
+pub struct StatePos {
+    #[serde(alias = "depositReserve", alias = "borrowReserve")]
+    pub reserve: String,
+    /// Market value as a scaled fraction (2^60). Stale — proportions only.
+    pub market_value_sf: Num,
+}
+
+/// Kamino encodes fractional values as scaled fractions with a 2^60 factor.
+const SCALED_FRACTION: f64 = 1_152_921_504_606_846_976.0; // 2^60
+
+impl StatePos {
+    fn usd(&self) -> f64 {
+        self.market_value_sf.val() / SCALED_FRACTION
+    }
+    fn is_real(&self) -> bool {
+        !self.reserve.is_empty() && !self.reserve.starts_with("111111") && self.usd() > 0.0
+    }
+}
+
+/// Reserve-address -> token symbol, from the market's reserves/metrics feed.
+pub type ReserveMap = std::collections::HashMap<String, String>;
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReserveRow {
+    reserve: String,
+    #[serde(default)]
+    liquidity_token: String,
+}
+
+/// Parse `/kamino-market/{market}/reserves/metrics` into reserve -> symbol.
+/// A failure here is non-fatal: the report degrades to reserve prefixes.
+pub fn parse_reserves(body: &str) -> ReserveMap {
+    serde_json::from_str::<Vec<ReserveRow>>(body)
+        .map(|rows| {
+            rows.into_iter()
+                .filter(|r| !r.liquidity_token.is_empty())
+                .map(|r| (r.reserve, r.liquidity_token))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn compose(positions: &[StatePos], reserves: &ReserveMap) -> Vec<(String, f64)> {
+    let mut out: Vec<(String, f64)> = positions
+        .iter()
+        .filter(|p| p.is_real())
+        .map(|p| {
+            let name = reserves.get(&p.reserve).cloned().unwrap_or_else(|| {
+                let r = &p.reserve;
+                if r.len() > 6 { format!("{}..", &r[..6]) } else { r.clone() }
+            });
+            (name, p.usd())
+        })
+        .collect();
+    out.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    out
 }
 
 /// The live API returns deposits/borrows as an object keyed by reserve (and
@@ -108,7 +191,7 @@ fn positions(v: &[Position]) -> Vec<(String, f64)> {
 }
 
 /// Parse the `/users/{wallet}/obligations` response body.
-pub fn parse_obligations(body: &str) -> Result<Vec<Obligation>, String> {
+pub fn parse_obligations(body: &str, reserves: &ReserveMap) -> Result<Vec<Obligation>, String> {
     let raw: Vec<ApiObligation> =
         serde_json::from_str(body).map_err(|e| format!("unexpected API shape: {e}"))?;
     Ok(raw
@@ -137,8 +220,14 @@ pub fn parse_obligations(body: &str) -> Result<Vec<Obligation>, String> {
             if ltv <= 0.0 && dep_usd > 0.0 {
                 ltv = bor_usd / dep_usd;
             }
+            let state_deposits = compose(&o.state.deposits, reserves);
+            let state_borrows = compose(&o.state.borrows, reserves);
             Obligation {
                 address: o.obligation_address,
+                last_update_slot: o.state.last_update.slot.val() as u64,
+                onchain_stale: o.state.last_update.stale.val() != 0.0,
+                collateral_tokens: if deposits.is_empty() { state_deposits } else { deposits.clone() },
+                debt_tokens: if borrows.is_empty() { state_borrows } else { borrows.clone() },
                 deposits_usd: dep_usd,
                 borrows_usd: bor_usd,
                 ltv,
