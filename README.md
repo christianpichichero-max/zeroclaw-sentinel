@@ -19,11 +19,43 @@ nothing**: custody tier T0 by construction.
    └─ you, executing fixes in your own wallet
 ```
 
+## The second plugin: `prepare_repay` (T1 — Build)
+
+When a position needs de-risking, Sentinel can now prepare the fix as an
+**unsigned** instruction set the owner signs in their own wallet. It still
+holds no keys, signs nothing, and submits nothing.
+
+Two design choices carry the safety:
+
+1. **No baked-in lifetime.** It calls Kamino's `/ktx/klend/repay-instructions`
+   rather than `/ktx/klend/repay`. The latter returns a transaction with a live
+   blockhash already inside, which expires in ~90 seconds — useless when a
+   human is asleep or at lunch. The instruction form carries no blockhash and
+   no fee payer, so the signer sets the lifetime and can anchor it to a durable
+   nonce.
+2. **Trust nothing, including the API.** Nothing forces an external endpoint to
+   return the repay you asked for. So the plugin decodes the returned bytes
+   itself and refuses to hand over anything that fails: a foreign program
+   smuggled into the set, an owner that is not your wallet, a different
+   reserve, a different amount, or a zero. A failed check returns
+   `DO NOT SIGN` with the reason. Ten adversarial tests cover exactly these
+   cases.
+
+```
+prepare_repay(wallet, amount:"25", token:"USDC")
+  -> {"prepared": true, "custody": "UNSIGNED - holds no keys, signs nothing",
+      "verified_independently": {"is_kamino_repay": true,
+        "amount_base_units": 25000000, "token_decimals": 6,
+        "no_foreign_programs": true, "owner_is_your_wallet": true}, ...}
+```
+
 ## Layout
 
-- `plugins/lending-health/` — the WASM tool plugin (wit/v0 `tool-plugin`
-  world). Pure math core (`src/health.rs`) + tolerant API parser
+- `plugins/lending-health/` — the monitoring WASM tool plugin (wit/v0
+  `tool-plugin` world). Pure math core (`src/health.rs`) + tolerant API parser
   (`src/parse.rs`) are native-tested; component glue in `src/lib.rs`.
+- `plugins/prepare-repay/` — the unsigned-repay plugin. Pure verification core
+  (`src/verify.rs`) decodes and checks instructions before they are shown.
 - `sentinel/sops/lending-watch/` — the deterministic monitoring SOP
   (cron + classify + alert, coalescing admission).
 - `WRITEUP.md` — custody tier, threat model, reproduction steps.
@@ -59,7 +91,8 @@ health check still returns correct numbers, just with less detail.
 
 ## Status
 
-Plugin compiles clean to `wasm32-wasip2`; **17/17 native tests pass**.
+Both plugins compile clean to `wasm32-wasip2`; **27/27 native tests pass**
+(17 monitoring + 10 adversarial verification).
 Verified end to end against a live $33.7M Kamino obligation (dSOL + hSOL
 collateral, USDC debt, 30.65% LTV vs 55% liquidation threshold, on-chain
 snapshot 84 days stale — correctly flagged). See BUILD_NOTES.md.

@@ -1,0 +1,9 @@
+name = "prepare-repay"
+version = "0.1.0"
+description = "Prepare an UNSIGNED Kamino repay the owner signs in their own wallet. Independently verifies the returned instructions before showing them. Holds no keys, signs nothing, submits nothing."
+author = "Sentinel"
+wasm_path = "prepare_repay.wasm"
+capabilities = ["tool"]
+# http_client: POST to the configured Kamino transactions API.
+# config_read: api_base / market overrides, both optional.
+permissions = ["http_client", "config_read"]
